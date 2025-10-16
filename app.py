@@ -2,6 +2,7 @@ import os
 import requests
 from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
+from supermemory import Supermemory
 
 # This line loads the API keys from your .env file
 load_dotenv()
@@ -13,55 +14,50 @@ app = Flask(__name__)
 SUPERMEMORY_API_KEY = os.getenv("SUPERMEMORY_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Base url's 
-SUPERMEMORY_BASE_URL = "https://api.supermemory.ai/v3"
+
+try:
+    supermemory_client = Supermemory(api_key=SUPERMEMORY_API_KEY)
+except Exception as e:
+    print(f"Error initializing Supermemory client: {e}")
+    supermemory_client = None
+
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
 
 
 # --- API Client Functions ---
 
-def add_memory_to_supermemory(content_string, source_filename):
-    """
-    Adds a document by sending its content as a string within a JSON payload.
-    """
-    print(f"Sending content from '{source_filename}' to Supermemory as JSON...")
-    headers = {
-        "Authorization": f"Bearer {SUPERMEMORY_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "content": content_string,
-        "source": source_filename
-    }
-    response = requests.post(f"{SUPERMEMORY_BASE_URL}/memories", json=payload, headers=headers)
-    response.raise_for_status()
-    result = response.json()
-    print(f"Successfully posted content. Supermemory response: {result}")
+def upload_document_to_supermemory(file):
+    filename = file.filename
+    print(f"Uploading '{filename}' as a Document object via the SDK...")
+    
+    # Read the file content into bytes
+    file_content = file.read()
+    
+    result = supermemory_client.memories.upload_file(
+        file=(filename, file_content),
+        container_tags=[filename]
+    )
+    
+    print(f"Successfully submitted Document for processing. Response: {result}")
     return result
 
-def search_supermemory(query):
-    """
-    Searches for documents using a POST request as per the documentation.
-    """
-    print(f"Searching Supermemory documents (v3) for: '{query}'")
-    headers = {
-        "Authorization": f"Bearer {SUPERMEMORY_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "q": query,
-        "limit": 1
-    }
-    response = requests.post(f"{SUPERMEMORY_BASE_URL}/search", json=payload, headers=headers)
-    response.raise_for_status()
-    result = response.json()
-    print("Received search results from Supermemory.")
-    return result.get("results", [])
+def search_with_supermemory(query):
+    print(f"Searching Supermemory documents (v3) via SDK for: '{query}'")
+    
+    results = supermemory_client.search.documents(
+        q=query,
+        limit=3,
+        document_threshold=0.5,
+        chunk_threshold=0.5,
+        rerank=True,
+        include_summary=True,
+    )
+    
+    print("Received search results from Supermemory SDK.")
+    return results
+
 
 def generate_cohesive_answer(question, context, source):
-    """
-    Uses the Google Gemini API to generate a natural, cohesive answer.
-    """
     print("Sending retrieved context to Gemini for answer generation...")
     headers = {"Content-Type": "application/json"}
     
@@ -92,52 +88,52 @@ def generate_cohesive_answer(question, context, source):
 
 @app.route('/')
 def index():
-    if not SUPERMEMORY_API_KEY or not GEMINI_API_KEY:
-        return "<h1>Configuration Error: API keys are missing. Please check your .env file.</h1>", 500
+    if not supermemory_client or not GEMINI_API_KEY:
+        return "<h1>Configuration Error: Client failed to initialize. Please check your API keys.</h1>", 500
     return render_template('index.html')
 
 @app.route('/upload', methods=['POST'])
 def upload_file_route():
-    if 'file' not in request.files:
-        return jsonify({"success": False, "error": "No file part"}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"success": False, "error": "No selected file"}), 400
+    file = request.files.get('file')
+    if not file or file.filename == '':
+        return jsonify({"success": False, "error": "No file selected"}), 400
     
     try:
-        content_string = file.read().decode('utf-8', errors='ignore')
-        add_memory_to_supermemory(content_string, file.filename)
-        return jsonify({"success": True, "message": f"'{file.filename}' was successfully added to Supermemory."})
-    except requests.exceptions.HTTPError as e:
-        return jsonify({"success": False, "error": f"API Error: {e.response.status_code} - {e.response.text}"}), 500
+        upload_document_to_supermemory(file)
+        return jsonify({"success": True, "message": f"'{file.filename}' was successfully sent to Supermemory."})
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": f"An error occurred: {str(e)}"}), 500
 
 @app.route('/query', methods=['POST'])
 def query_route():
-    data = request.get_json()
-    question = data.get('question')
+    question = request.get_json().get('question')
     if not question:
         return jsonify({"error": "Question is required."}), 400
 
     try:
-        search_results = search_supermemory(question)
-        if not search_results or not search_results[0].get('chunks'):
-            return jsonify({"answer": "I'm sorry, I couldn't find any information in your documents related to that question."})
+    # search_results is a SearchDocumentsResponse
+        search_results = search_with_supermemory(question)
 
-        top_result = search_results[0]
-        top_chunk = top_result['chunks'][0]
-        context = top_chunk.get('content', '')
-        source = top_result.get('title', 'an uploaded document')
+        # Extract the actual list of hits
+        results_list = search_results.results
+
+        # Handle case: no results or no chunks
+        if not results_list or not getattr(results_list[0], "chunks", []):
+            return jsonify({
+                "answer": "I'm sorry, I couldn't find any information in your documents related to that question."
+            })
+
+
+        for i, result in enumerate(results_list):
+            chunks = getattr(result, "chunks", [])
+            if chunks:
+                source = getattr(result, "title", f"Source {i+1}")
+                context = getattr(chunks[0], "content", "")
 
         final_answer = generate_cohesive_answer(question, context, source)
         return jsonify({"answer": final_answer})
-    except requests.exceptions.HTTPError as e:
-        return jsonify({"error": f"API Error: {e.response.status_code} - {e.response.text}"}), 500
-    except (IndexError, KeyError) as e:
-        return jsonify({"error": f"Could not parse the search response from Supermemory. Error: {e}"}), 500
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"An error occurred: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5001)

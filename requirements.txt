@@ -1,0 +1,14 @@
+# Supermemory Client
+supermemory
+
+# For watching the folder for file changes
+watchdog
+
+# For the RAG part to interact with Google's Gemini
+google-generativeai
+
+# To handle environment variables for API keys
+python-dotenv
+
+# To process different file types, like PDFs
+pypdf
